@@ -1,0 +1,1 @@
+# nRF54L15-zephyr-samples
