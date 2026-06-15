@@ -213,6 +213,33 @@ static const struct bt_mesh_comp comp = {
 	.elem_count = ARRAY_SIZE(elements),
 };
 
+/* --- ĐOẠN LOGIC BỔ SUNG CHO CHU KỲ NGỦ 30S / THỨC 5S --- */
+static struct k_work_delayable power_cycle_work;
+static bool is_sleeping = false;
+
+static void power_cycle_handler(struct k_work *work)
+{
+	if (!is_sleeping) {
+		/* ---- BẮT ĐẦU CHU KỲ NGỦ (Sleep 30 giây) ---- */
+		is_sleeping = true;
+		
+		/* Tắt LED khi đi ngủ để tiết kiệm năng lượng điện */
+		dk_set_led(2, false); /* Sửa thành số 3 nếu bạn muốn dùng LED 3 */
+
+		/* Lên lịch hẹn thức dậy sau 30 giây (30000 ms) */
+		k_work_reschedule(&power_cycle_work, K_MSEC(30000));
+	} else {
+		/* ---- BẮT ĐẦU CHU KỲ THỨC (Wake 5 giây) ---- */
+		is_sleeping = false;
+		
+		/* Khi thức dậy, bật LED sáng lên theo yêu cầu */
+		dk_set_led(2, true); /* Sửa thành số 3 nếu bạn muốn dùng LED 3 */
+		
+		/* Lên lịch duy trì trạng thái thức trong vòng 5 giây (5000 ms) */
+		k_work_reschedule(&power_cycle_work, K_MSEC(5000));
+	}
+}
+
 const struct bt_mesh_comp *model_handler_init(void)
 {
 	k_work_init_delayable(&attention_blink_work, attention_blink);
@@ -220,6 +247,10 @@ const struct bt_mesh_comp *model_handler_init(void)
 	for (int i = 0; i < ARRAY_SIZE(led_ctx); ++i) {
 		k_work_init_delayable(&led_ctx[i].work, led_work);
 	}
+
+	/* Khởi tạo và kích hoạt chu kỳ năng lượng ngay khi ứng dụng bắt đầu */
+	k_work_init_delayable(&power_cycle_work, power_cycle_handler);
+	k_work_reschedule(&power_cycle_work, K_NO_WAIT);
 
 	return &comp;
 }
