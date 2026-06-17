@@ -27,10 +27,10 @@ static void bt_ready(int err)
 		return;
 	}
 
-	err = dk_buttons_init(NULL);
-	if (err) {
-		return;
-	}
+	// err = dk_buttons_init(NULL);
+	// if (err) {
+	// 	return;
+	// }
 
 	err = bt_mesh_init(bt_mesh_dk_prov_init(), model_handler_init());
 	if (err) {
@@ -43,17 +43,7 @@ static void bt_ready(int err)
 
 	bt_mesh_prov_enable(BT_MESH_PROV_ADV | BT_MESH_PROV_GATT);
 
-	/* * [CỰC KỲ QUAN TRỌNG] ĐỂ GIẢM DÒNG XUỐNG THẤP NHẤT TRÊN BO MẠCH THỰC TẾ:
-	 * Sau khi thiết bị đã nạp cấu hình Mesh (hoặc chạy ổn định), bạn cần tắt hẳn LED trạng thái.
-	 * Ở đây chúng ta ép tắt tất cả các đèn LED trên kit nhằm triệt tiêu dòng tiêu thụ qua trở treo.
-	 */
 	dk_set_leds(0x00); 
-
-	/* * Mẹo nâng cao: Nếu thiết bị của bạn là cảm biến pin ko cần nhấn nút liên tục, 
-	 * sau khi chạy xong bạn có thể dùng lệnh giải phóng chân GPIO của nút nhấn 
-	 * để tránh dòng rò chạy qua điện trở kéo Pull-up nội bộ (Internal Pull-ups ngốn ~10-40uA/chân).
-	 * Ví dụ: nrf_gpio_cfg_default(PIN_NUMBER);
-	 */
 }
 
 int main(void)
