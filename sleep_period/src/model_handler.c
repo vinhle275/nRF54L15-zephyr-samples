@@ -5,14 +5,11 @@
  */
 
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/mesh.h> 
 #include <bluetooth/mesh/models.h>
 #include <dk_buttons_and_leds.h>
 #include "model_handler.h"
 #include <zephyr/logging/log.h>
-
-// Thêm thư viện quản lý sâu tầng lõi Bluetooth Mesh của Nordic để điều khiển tắt/bật RF
-#include <../subsys/bluetooth/mesh/net.h>
-#include <../subsys/bluetooth/mesh/adv.h>
 
 LOG_MODULE_REGISTER(model_handler, CONFIG_LOG_DEFAULT_LEVEL);
 
@@ -51,7 +48,7 @@ static struct led_ctx led_ctx[] = {
 };
 
 #define LED_ON   false
-#define LED_OFF    true
+#define LED_OFF  true
 
 static void led_transition_start(struct led_ctx *led)
 {
@@ -70,25 +67,89 @@ static void led_status(struct led_ctx *led, struct bt_mesh_onoff_status *status)
 }
 
 /* ====================================================================
- * LOGIC QUẢN LÝ CHU KỲ NĂNG LƯỢNG TIẾT KIỆM NGUỒN SÂU
+ * LOGIC CHU KỲ NGUỒN VÀ TRUYỀN DỮ LIỆU CÓ BỘ ĐỆM AN TOÀN
  * ==================================================================== */
-static struct k_work_delayable cycle_work;  
-static struct k_work_delayable blink_work;  
+static struct k_work_delayable cycle_work;   // Timer đảo trạng thái Thức/Ngủ
+static struct k_work_delayable suspend_work; // MỚI: Timer delay để tắt Radio an toàn
+static struct k_work_delayable blink_work;   // Timer nháy LED 2
+static struct k_work_delayable publish_work; // Timer gửi gói tin định kỳ
+
 static bool cycle_mode_active = false;      
 static bool is_awake = true;                
 static bool led2_blink_state = false;       
+static bool next_state_on = true; 
 
+static struct bt_mesh_onoff_cli onoff_cli; 
+
+/* HÀM PHỤ TRỢ: Đóng gói và gửi lệnh Mesh tới Group C002 */
+static void send_mesh_packet(bool turn_on)
+{
+	struct bt_mesh_onoff_set set = {
+		.on_off = turn_on ? 1 : 0, 
+		.transition = NULL,
+	};
+
+	struct bt_mesh_msg_ctx ctx = {
+		.app_idx = 0,               // Map với AppKey 1
+		.addr = 0xC002,             // Gửi tới Group C002
+		.send_ttl = BT_MESH_TTL_DEFAULT,              
+	};
+
+	int err = bt_mesh_onoff_cli_set(&onoff_cli, &ctx, &set, NULL);
+	
+	if (err && err != -EALREADY) {
+		LOG_ERR("Loi gui tin (err %d)", err);
+	} else {
+		LOG_INF("--- [PHAT SONG]: Da gui lenh %s len C002 ---", turn_on ? "BAT (ON)" : "TAT (OFF)");
+	}
+}
+
+/* HÀM XỬ LÝ NHÁY LED 2: Chỉ nháy khi thức */
 static void blink_handler(struct k_work *work)
 {
 	if (!cycle_mode_active || !is_awake) {
-		return; 
+		return; // Không nháy nếu đang đi ngủ
 	}
 
 	led2_blink_state = !led2_blink_state;
 	dk_set_led(2, led2_blink_state ? LED_ON : LED_OFF);
+	
 	k_work_reschedule(&blink_work, K_MSEC(100));
 }
 
+/* HÀM BẮN GÓI TIN: Liên tục gửi gói tin BẬT / TẮT khi đang thức */
+static void publish_handler(struct k_work *work)
+{
+	if (!cycle_mode_active || !is_awake) {
+		return;
+	}
+
+	send_mesh_packet(next_state_on);
+	next_state_on = !next_state_on;
+
+	k_work_reschedule(&publish_work, K_MSEC(1000));
+}
+
+/* HÀM MỚI: Thực hiện tắt Radio (Ngủ Sâu) sau khi gói tin đã bay đi an toàn */
+static void suspend_handler(struct k_work *work)
+{
+	// Bảo vệ 2 lớp: Nếu chu kỳ bị ngắt giữa chừng hoặc mạch đang thức thì không tắt Radio
+	if (is_awake || !cycle_mode_active) {
+		return;
+	}
+
+	k_work_cancel_delayable(&blink_work);  
+
+	for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
+		dk_set_led(i, LED_OFF);
+	}
+
+	// ĐÓNG BĂNG MẠNG: Chỉ gọi hàm này khi chắc chắn hàng đợi Mesh TX đã trống
+	bt_mesh_suspend(); 
+	LOG_INF("--- [RADIO]: Da dong bang Radio, ngat mach di ngu! ---");
+}
+
+/* HÀM QUẢN LÝ CHU KỲ NGUỒN: Chỉ điều phối, nhường việc ngủ cho suspend_work */
 static void cycle_handler(struct k_work *work)
 {
 	if (!cycle_mode_active) {
@@ -98,35 +159,42 @@ static void cycle_handler(struct k_work *work)
 	is_awake = !is_awake;
 
 	if (is_awake) {
-		/* ----------------------------------------------------
-		 * THỨC GIẤC: Bật lại RF Mesh trước rồi mới bật LED
-		 * ---------------------------------------------------- */
-		bt_mesh_resume();
+		/* --- 🟢 MẠCH THỨC GIẤC (10s) --- */
+		bt_mesh_resume(); // Đánh thức Radio ngay lập tức
+		LOG_INF("--- [RADIO]: Da khoi dong lai Radio! ---");
 
 		for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
-			if (i != 2) { 
+			if (i != 1 && i != 2 && i != 3) { 
 				dk_set_led(i, led_ctx[i].value ? LED_ON : LED_OFF);
 			}
 		}
-		k_work_reschedule(&blink_work, K_NO_WAIT);
+		
+		led2_blink_state = true;
+		dk_set_led(2, LED_ON);
+		k_work_reschedule(&blink_work, K_MSEC(100)); // LED nháy ngay lập tức
+
+		next_state_on = true; 
+		
+		// ĐỢI 500MS SAU KHI THỨC: Cho chip RF nạp đủ năng lượng và kết nối mạng rồi mới bắn tin
+		k_work_reschedule(&publish_work, K_MSEC(500)); 
+
+		// Hẹn giờ đi ngủ sau 10s
+		k_work_reschedule(&cycle_work, K_MSEC(10000));
 
 	} else {
-		/* ----------------------------------------------------
-		 * ĐI NGỦ: TẮT LED TRƯỚC -> CHO MESH NGỦ SAU
-		 * ---------------------------------------------------- */
-		k_work_cancel_delayable(&blink_work);
+		/* --- 🔴 MẠCH SẮP ĐI NGỦ (10s) --- */
+		
+		k_work_cancel_delayable(&publish_work); // Ngừng gửi tin chu kỳ 1s
 
-		// Bước 1: Ép tắt toàn bộ LED vật lý để giải phóng chân GPIO hoàn toàn
-		for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
-			dk_set_led(i, LED_OFF); 
-		}
+		// Bắn gói tin OFF cuối cùng để chốt sổ
+		send_mesh_packet(false); 
 
-		// Bước 2: Sau khi mọi ngoại vi đã tắt, mới cho phép Mesh đóng Radio ngủ đông.
-		// Lúc này không còn lệnh nào can thiệp chân nữa, hệ thống sẽ rơi vào trạng thái ngủ sâu tuyệt đối.
-		bt_mesh_suspend();
+		// ÂN HẠN 1 GIÂY (1000ms): Chờ gói tin bay đi trót lọt rồi mới ủy quyền cho suspend_handler rút điện Radio!
+		k_work_reschedule(&suspend_work, K_MSEC(1000)); 
+
+		// Hẹn giờ thức giấc sau 10s
+		k_work_reschedule(&cycle_work, K_MSEC(10000));
 	}
-
-	k_work_reschedule(&cycle_work, K_MSEC(10000));
 }
 
 static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
@@ -136,29 +204,46 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
 	int led_idx = led - &led_ctx[0];
 
-	if (led_idx == 2) {
+	/* ----- ĐÓN VÀ XỬ LÝ GÓI TIN MẠCH B (LED 1) ----- */
+	if (led_idx == 1) { 
+		led->value = set->on_off;
+		
+		if (set->on_off == 1) {
+			dk_set_led(1, LED_ON);
+		} else {
+			dk_set_led(1, LED_OFF);
+		}
+	} 
+	/* ----- KÍCH HOẠT CHU KỲ NĂNG LƯỢNG QUA LED 2 ----- */
+	else if (led_idx == 2) { 
 		led->value = set->on_off;
 
 		if (set->on_off == 1) {
 			if (!cycle_mode_active) {
 				cycle_mode_active = true;
 				is_awake = true;
-				k_work_reschedule(&cycle_work, K_MSEC(10000)); 
-				k_work_reschedule(&blink_work, K_NO_WAIT);     
+				
+				k_work_reschedule(&blink_work, K_NO_WAIT);    
+				k_work_reschedule(&cycle_work, K_MSEC(10000));
+				
+				next_state_on = true;
+				k_work_reschedule(&publish_work, K_MSEC(500));
 			}
 		} else {
 			cycle_mode_active = false;
 			is_awake = true; 
+			
+			// Hủy toàn bộ mọi lịch trình đang chờ
 			k_work_cancel_delayable(&cycle_work);
 			k_work_cancel_delayable(&blink_work);
+			k_work_cancel_delayable(&publish_work);
+			k_work_cancel_delayable(&suspend_work); // Bổ sung hủy bộ đệm đi ngủ
 			
-			// Đảm bảo đánh thức lại bộ phát nếu tắt chu kỳ ngủ giữa chừng
-			bt_mesh_resume();
-
+			bt_mesh_resume(); // Ép hệ thống luôn thức
 			dk_set_led(2, LED_ON);
 
 			for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
-				if (i != 2) {
+				if (i != 1 && i != 2 && i != 3) {
 					dk_set_led(i, led_ctx[i].value ? LED_ON : LED_OFF);
 				}
 			}
@@ -166,10 +251,9 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 	} 
 	else {
 		led->value = set->on_off; 
-
 		if (!bt_mesh_model_transition_time(set->transition)) {
 			led->remaining = 0;
-			if (is_awake) {
+			if (is_awake && led_idx != 3) {
 				dk_set_led(led_idx, set->on_off ? LED_ON : LED_OFF);
 			}
 		} else {
@@ -177,7 +261,7 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 			if (set->transition->delay) {
 				k_work_reschedule(&led->work, K_MSEC(set->transition->delay));
 			} else {
-				if (is_awake) {
+				if (is_awake && led_idx != 3) {
 					led_transition_start(led);
 				}
 			}
@@ -204,10 +288,9 @@ static void led_work(struct k_work *work)
 	if (led->remaining) {
 		led_transition_start(led);
 	} else {
-		if (is_awake && led_idx != 2) {
+		if (is_awake && led_idx != 1 && led_idx != 2 && led_idx != 3) {
 			dk_set_led(led_idx, led->value ? LED_ON : LED_OFF);
 		}
-
 		struct bt_mesh_onoff_status status;
 		led_status(led, &status);
 		bt_mesh_onoff_srv_pub(&led->srv, NULL, &status);
@@ -273,7 +356,8 @@ static struct bt_mesh_elem elements[] = {
 		1, BT_MESH_MODEL_LIST(
 			BT_MESH_MODEL_CFG_SRV,
 			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub),
-			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv)),
+			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv),
+			BT_MESH_MODEL_ONOFF_CLI(&onoff_cli)),
 		BT_MESH_MODEL_NONE),
 #endif
 #if DT_NODE_EXISTS(DT_ALIAS(led1))
@@ -308,8 +392,11 @@ const struct bt_mesh_comp *model_handler_init(void)
 		led_ctx[i].value = 0; 
 	}
 
+	// Đăng ký toàn bộ hàng đợi
 	k_work_init_delayable(&blink_work, blink_handler);
 	k_work_init_delayable(&cycle_work, cycle_handler);
+	k_work_init_delayable(&publish_work, publish_handler); 
+	k_work_init_delayable(&suspend_work, suspend_handler); // BỘ ĐỆM ĐI NGỦ
 
 	cycle_mode_active = false;
 	is_awake = true;
