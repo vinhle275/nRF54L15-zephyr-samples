@@ -187,10 +187,11 @@ static void cycle_handler(struct k_work *work)
 		k_work_cancel_delayable(&publish_work); // Ngừng gửi tin chu kỳ 1s
 
 		// Bắn gói tin OFF cuối cùng để chốt sổ
-		send_mesh_packet(false); 
+		//send_mesh_packet(false); 
 
 		// ÂN HẠN 1 GIÂY (1000ms): Chờ gói tin bay đi trót lọt rồi mới ủy quyền cho suspend_handler rút điện Radio!
-		k_work_reschedule(&suspend_work, K_MSEC(1000)); 
+		//k_work_reschedule(&suspend_work, K_MSEC(1000)); 
+		k_work_reschedule(&suspend_work, K_NO_WAIT);
 
 		// Hẹn giờ thức giấc sau 10s
 		k_work_reschedule(&cycle_work, K_MSEC(10000));

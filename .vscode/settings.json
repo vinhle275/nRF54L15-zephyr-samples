@@ -1,6 +1,6 @@
 {
     "nrf-connect.applications": [
         "${workspaceFolder}\\sleep",
-        "${workspaceFolder}\\sleep_period"
+        "${workspaceFolder}\\light"
     ]
 }
