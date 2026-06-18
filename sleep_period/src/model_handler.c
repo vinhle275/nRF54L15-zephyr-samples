@@ -1,303 +1,411 @@
-// /*
-//  * Copyright (c) 2019 Nordic Semiconductor ASA
-//  *
-//  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
-//  */
+/*
+ * Copyright (c) 2019 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
 
-// #include <zephyr/bluetooth/bluetooth.h>
-// #include <bluetooth/mesh/models.h>
-// #include <dk_buttons_and_leds.h>
-// #include "model_handler.h"
-// #include <zephyr/logging/log.h>
-// LOG_MODULE_REGISTER(model_handler, CONFIG_LOG_DEFAULT_LEVEL);
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/mesh.h> 
+#include <bluetooth/mesh/models.h>
+#include <dk_buttons_and_leds.h>
+#include "model_handler.h"
+#include <zephyr/logging/log.h>
 
-// static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
-// 		    const struct bt_mesh_onoff_set *set,
-// 		    struct bt_mesh_onoff_status *rsp);
+LOG_MODULE_REGISTER(model_handler, CONFIG_LOG_DEFAULT_LEVEL);
 
-// static void led_get(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
-// 		    struct bt_mesh_onoff_status *rsp);
+static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
+		    const struct bt_mesh_onoff_set *set,
+		    struct bt_mesh_onoff_status *rsp);
 
-// static const struct bt_mesh_onoff_srv_handlers onoff_handlers = {
-// 	.set = led_set,
-// 	.get = led_get,
-// };
+static void led_get(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
+		    struct bt_mesh_onoff_status *rsp);
 
-// struct led_ctx {
-// 	struct bt_mesh_onoff_srv srv;
-// 	struct k_work_delayable work;
-// 	uint32_t remaining;
-// 	bool value;
-// };
+static const struct bt_mesh_onoff_srv_handlers onoff_handlers = {
+	.set = led_set,
+	.get = led_get,
+};
 
-// static struct led_ctx led_ctx[] = {
-// #if DT_NODE_EXISTS(DT_ALIAS(led0))
-// 	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led1))
-// 	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led2))
-// 	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led3))
-// 	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
-// #endif
-// };
+struct led_ctx {
+	struct bt_mesh_onoff_srv srv;
+	struct k_work_delayable work;
+	uint32_t remaining;
+	bool value;
+};
 
-// static void led_transition_start(struct led_ctx *led)
-// {
-// 	int led_idx = led - &led_ctx[0];
+static struct led_ctx led_ctx[] = {
+#if DT_NODE_EXISTS(DT_ALIAS(led0))
+	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led3))
+	{ .srv = BT_MESH_ONOFF_SRV_INIT(&onoff_handlers) },
+#endif
+};
 
-// 	/* As long as the transition is in progress, the onoff
-// 	 * state is "on":
-// 	 */
-// 	dk_set_led(led_idx, true);
-// 	k_work_reschedule(&led->work, K_MSEC(led->remaining));
-// 	led->remaining = 0;
-// }
+#define LED_ON   false
+#define LED_OFF  true
 
-// static void led_status(struct led_ctx *led, struct bt_mesh_onoff_status *status)
-// {
-// 	/* Do not include delay in the remaining time. */
-// 	status->remaining_time = led->remaining ? led->remaining :
-// 		k_ticks_to_ms_ceil32(k_work_delayable_remaining_get(&led->work));
-// 	status->target_on_off = led->value;
-// 	/* As long as the transition is in progress, the onoff state is "on": */
-// 	status->present_on_off = led->value || status->remaining_time;
-// }
+static void led_transition_start(struct led_ctx *led)
+{
+	int led_idx = led - &led_ctx[0];
+	dk_set_led(led_idx, LED_ON); 
+	k_work_reschedule(&led->work, K_MSEC(led->remaining));
+	led->remaining = 0;
+}
 
-// static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
-// 		    const struct bt_mesh_onoff_set *set,
-// 		    struct bt_mesh_onoff_status *rsp)
-// {
-// 	LOG_INF("Tin nhan nhan duoc: %d, tu source: 0x%04x", set->on_off, ctx->addr);
-// 	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
-// 	int led_idx = led - &led_ctx[0];
+static void led_status(struct led_ctx *led, struct bt_mesh_onoff_status *status)
+{
+	status->remaining_time = led->remaining ? led->remaining :
+		k_ticks_to_ms_ceil32(k_work_delayable_remaining_get(&led->work));
+	status->target_on_off = led->value;
+	status->present_on_off = led->value || status->remaining_time;
+}
 
-// 	if (set->on_off == led->value) {
-// 		goto respond;
-// 	}
+/* ====================================================================
+ * LOGIC CHU KỲ NGUỒN VÀ TRUYỀN DỮ LIỆU CÓ BỘ ĐỆM AN TOÀN
+ * ==================================================================== */
+static struct k_work_delayable cycle_work;   // Timer đảo trạng thái Thức/Ngủ
+static struct k_work_delayable suspend_work; // MỚI: Timer delay để tắt Radio an toàn
+static struct k_work_delayable blink_work;   // Timer nháy LED 2
+static struct k_work_delayable publish_work; // Timer gửi gói tin định kỳ
 
-// 	led->value = set->on_off;
-// 	if (!bt_mesh_model_transition_time(set->transition)) {
-// 		led->remaining = 0;
-// 		dk_set_led(led_idx, set->on_off);
-// 		goto respond;
-// 	}
+static bool cycle_mode_active = false;      
+static bool is_awake = true;                
+static bool led2_blink_state = false;       
+static bool next_state_on = true; 
 
-// 	led->remaining = set->transition->time;
+static struct bt_mesh_onoff_cli onoff_cli; 
 
-// 	if (set->transition->delay) {
-// 		k_work_reschedule(&led->work, K_MSEC(set->transition->delay));
-// 	} else {
-// 		led_transition_start(led);
-// 	}
+/* HÀM PHỤ TRỢ: Đóng gói và gửi lệnh Mesh tới Group C002 */
+static void send_mesh_packet(bool turn_on)
+{
+	struct bt_mesh_onoff_set set = {
+		.on_off = turn_on ? 1 : 0, 
+		.transition = NULL,
+	};
 
-// respond:
-// 	if (rsp) {
-// 		led_status(led, rsp);
-// 	}
-// }
+	struct bt_mesh_msg_ctx ctx = {
+		.app_idx = 0,               // Map với AppKey 1
+		.addr = 0xC002,             // Gửi tới Group C002
+		.send_ttl = BT_MESH_TTL_DEFAULT,              
+	};
 
-// static void led_get(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
-// 		    struct bt_mesh_onoff_status *rsp)
-// {
-// 	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
-
-// 	led_status(led, rsp);
-// }
-
-// static void led_work(struct k_work *work)
-// {
-// 	struct led_ctx *led = CONTAINER_OF(work, struct led_ctx, work.work);
-// 	int led_idx = led - &led_ctx[0];
-
-// 	if (led->remaining) {
-// 		led_transition_start(led);
-// 	} else {
-// 		dk_set_led(led_idx, led->value);
-
-// 		/* Publish the new value at the end of the transition */
-// 		struct bt_mesh_onoff_status status;
-
-// 		led_status(led, &status);
-// 		bt_mesh_onoff_srv_pub(&led->srv, NULL, &status);
-// 	}
-// }
-
-// /* Set up a repeating delayed work to blink the DK's LEDs when attention is
-//  * requested.
-//  */
-// static struct k_work_delayable attention_blink_work;
-// static bool attention;
-
-// static void attention_blink(struct k_work *work)
-// {
-// 	static int idx;
-// 	const uint8_t pattern[] = {
-// #if DT_NODE_EXISTS(DT_ALIAS(led0))
-// 		BIT(0),
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led1))
-// 		BIT(1),
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led2))
-// 		BIT(2),
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led3))
-// 		BIT(3),
-// #endif
-// 	};
-
-// 	if (attention) {
-// 		dk_set_leds(pattern[idx++ % ARRAY_SIZE(pattern)]);
-// 		k_work_reschedule(&attention_blink_work, K_MSEC(30));
-// 	} else {
-// 		dk_set_led(0, true); // Tắt LED 1 (index 0)
-// 		dk_set_led(1, true); // Tắt LED 2 (index 1)
-// 		dk_set_led(2, true); // Tắt LED 3 (index 2)
-// 		dk_set_led(3, true); // Tắt LED 4 (index 3)
-// 	}
-// }
-
-// static void attention_on(const struct bt_mesh_model *mod)
-// {
-// 	attention = true;
-// 	k_work_reschedule(&attention_blink_work, K_NO_WAIT);
-// }
-
-// static void attention_off(const struct bt_mesh_model *mod)
-// {
-// 	/* Will stop rescheduling blink timer */
-// 	attention = false;
-// }
-
-// static const struct bt_mesh_health_srv_cb health_srv_cb = {
-// 	.attn_on = attention_on,
-// 	.attn_off = attention_off,
-// };
-
-// static struct bt_mesh_health_srv health_srv = {
-// 	.cb = &health_srv_cb,
-// };
-
-// BT_MESH_HEALTH_PUB_DEFINE(health_pub, 0);
-
-// static struct bt_mesh_elem elements[] = {
-// #if DT_NODE_EXISTS(DT_ALIAS(led0))
-// 	BT_MESH_ELEM(
-// 		1, BT_MESH_MODEL_LIST(
-// 			BT_MESH_MODEL_CFG_SRV,
-// 			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub),
-// 			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv)),
-// 		BT_MESH_MODEL_NONE),
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led1))
-// 	BT_MESH_ELEM(
-// 		2, BT_MESH_MODEL_LIST(BT_MESH_MODEL_ONOFF_SRV(&led_ctx[1].srv)),
-// 		BT_MESH_MODEL_NONE),
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led2))
-// 	BT_MESH_ELEM(
-// 		3, BT_MESH_MODEL_LIST(BT_MESH_MODEL_ONOFF_SRV(&led_ctx[2].srv)),
-// 		BT_MESH_MODEL_NONE),
-// #endif
-// #if DT_NODE_EXISTS(DT_ALIAS(led3))
-// 	BT_MESH_ELEM(
-// 		4, BT_MESH_MODEL_LIST(BT_MESH_MODEL_ONOFF_SRV(&led_ctx[3].srv)),
-// 		BT_MESH_MODEL_NONE),
-// #endif
-// };
-
-// static const struct bt_mesh_comp comp = {
-// 	.cid = CONFIG_BT_COMPANY_ID,
-// 	.elem = elements,
-// 	.elem_count = ARRAY_SIZE(elements),
-// };
-
-
-
-
-// static struct k_work_delayable cycle_work;  /* Định nghĩa công việc quản lý chu kỳ 10s */
-// static struct k_work_delayable blink_work;  /* Định nghĩa công việc nhấp nháy LED2 */
-// static bool is_awake = true;                /* Trạng thái ban đầu: Thức */
-// static bool led2_state = false;             /* Trạng thái chớp/tắt của LED2 */
-
-// /* Hàm xử lý nhấp nháy LED2 trong 10s thức */
-// static void blink_handler(struct k_work *work)
-// {
-// 	if (!is_awake) {
-// 		return; /* Nếu đang ngủ thì không chạy tiếp */
-// 	}
-
-// 	/* Đảo trạng thái và cập nhật LED2 */
-// 	led2_state = !led2_state;
-// 	dk_set_led(2, led2_state); /* LED thứ 3 có index là 2 */
-
-// 	/* Tiếp tục lên lịch nhấp nháy sau mỗi 500ms (có thể chỉnh tùy ý) */
-// 	k_work_reschedule(&blink_work, K_MSEC(500));
-// }
-
-// /* Hàm điều phối chu kỳ Thức 10s -> Ngủ 10s */
-// static void cycle_handler(struct k_work *work)
-// {
-// 	/* Đảo trạng thái hệ thống */
-// 	is_awake = !is_awake;
-
-// 	if (is_awake) {
-// 		LOG_INF("--- MACH THUC (10 giay) ---");
-		
-// 		/* 1. Tắt các LED còn lại để đảm bảo yêu cầu */
-// 		dk_set_led(0, true);
-// 		dk_set_led(1, true);
-// 		dk_set_led(3, true);
-
-// 		/* 2. Bắt đầu kích hoạt nhấp nháy LED2 */
-// 		led2_state = true;
-// 		dk_set_led(2, led2_state);
-// 		k_work_reschedule(&blink_work, K_MSEC(500));
-
-// 	} else {
-// 		LOG_INF("--- MACH NGU (10 giay) - TAT CAM BIEN/LED ---");
-		
-// 		/* Dừng việc nhấp nháy */
-// 		k_work_cancel_delayable(&blink_work);
-
-// 		/* Tắt toàn bộ 4 LED */
-// 		dk_set_led(0, true); // Tắt LED 1 (index 0)
-// 		dk_set_led(1, true); // Tắt LED 2 (index 1)
-// 		dk_set_led(2, true); // Tắt LED 3 (index 2)
-// 		dk_set_led(3, true); // Tắt LED 4 (index 3)
-// 	}
-
-// 	/* Tiếp tục lặp lại chu kỳ sau 10 giây (10000 ms) */
-// 	k_work_reschedule(&cycle_work, K_MSEC(10000));
-// }
-
-
-
-// const struct bt_mesh_comp *model_handler_init(void)
-// {
-// 	k_work_init_delayable(&attention_blink_work, attention_blink);
-
-// 	for (int i = 0; i < ARRAY_SIZE(led_ctx); ++i) {
-// 		k_work_init_delayable(&led_ctx[i].work, led_work);
-// 	}
-
-// 	/* Khởi tạo các công việc (work) mới được thêm vào */
-// 	k_work_init_delayable(&blink_work, blink_handler);
-// 	k_work_init_delayable(&cycle_work, cycle_handler);
-
-// 	/* Bắt đầu chu kỳ đầu tiên ngay lập tức (hoặc sau 10s thức đầu tiên) */
-// 	/* Ở đây mạch sẽ bắt đầu ở trạng thái THỨC trong 10s đầu tiên */
-// 	dk_set_led(0, false);
-// 	dk_set_led(1, false);
-// 	dk_set_led(3, false);
-// 	k_work_reschedule(&blink_work, K_MSEC(500));
+	int err = bt_mesh_onoff_cli_set(&onoff_cli, &ctx, &set, NULL);
 	
-// 	/* Lên lịch để chuyển sang trạng thái NGỦ sau 10 giây */
-// 	k_work_reschedule(&cycle_work, K_MSEC(10000));
+	if (err && err != -EALREADY) {
+		LOG_ERR("Loi gui tin (err %d)", err);
+	} else {
+		LOG_INF("--- [PHAT SONG]: Da gui lenh %s len C002 ---", turn_on ? "BAT (ON)" : "TAT (OFF)");
+	}
+}
 
-// 	return &comp;
-// }
+/* HÀM XỬ LÝ NHÁY LED 2: Chỉ nháy khi thức */
+static void blink_handler(struct k_work *work)
+{
+	if (!cycle_mode_active || !is_awake) {
+		return; // Không nháy nếu đang đi ngủ
+	}
+
+	led2_blink_state = !led2_blink_state;
+	dk_set_led(2, led2_blink_state ? LED_ON : LED_OFF);
+	
+	k_work_reschedule(&blink_work, K_MSEC(100));
+}
+
+/* HÀM BẮN GÓI TIN: Liên tục gửi gói tin BẬT / TẮT khi đang thức */
+static void publish_handler(struct k_work *work)
+{
+	if (!cycle_mode_active || !is_awake) {
+		return;
+	}
+
+	send_mesh_packet(next_state_on);
+	next_state_on = !next_state_on;
+
+	k_work_reschedule(&publish_work, K_MSEC(1000));
+}
+
+/* HÀM MỚI: Thực hiện tắt Radio (Ngủ Sâu) sau khi gói tin đã bay đi an toàn */
+static void suspend_handler(struct k_work *work)
+{
+	// Bảo vệ 2 lớp: Nếu chu kỳ bị ngắt giữa chừng hoặc mạch đang thức thì không tắt Radio
+	if (is_awake || !cycle_mode_active) {
+		return;
+	}
+
+	k_work_cancel_delayable(&blink_work);  
+
+	for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
+		dk_set_led(i, LED_OFF);
+	}
+
+	// ĐÓNG BĂNG MẠNG: Chỉ gọi hàm này khi chắc chắn hàng đợi Mesh TX đã trống
+	bt_mesh_suspend(); 
+	LOG_INF("--- [RADIO]: Da dong bang Radio, ngat mach di ngu! ---");
+}
+
+/* HÀM QUẢN LÝ CHU KỲ NGUỒN: Chỉ điều phối, nhường việc ngủ cho suspend_work */
+static void cycle_handler(struct k_work *work)
+{
+	if (!cycle_mode_active) {
+		return;
+	}
+
+	is_awake = !is_awake;
+
+	if (is_awake) {
+		/* --- 🟢 MẠCH THỨC GIẤC (10s) --- */
+		bt_mesh_resume(); // Đánh thức Radio ngay lập tức
+		LOG_INF("--- [RADIO]: Da khoi dong lai Radio! ---");
+
+		for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
+			if (i != 1 && i != 2 && i != 3) { 
+				dk_set_led(i, led_ctx[i].value ? LED_ON : LED_OFF);
+			}
+		}
+		
+		led2_blink_state = true;
+		dk_set_led(2, LED_ON);
+		k_work_reschedule(&blink_work, K_MSEC(100)); // LED nháy ngay lập tức
+
+		next_state_on = true; 
+		
+		// ĐỢI 500MS SAU KHI THỨC: Cho chip RF nạp đủ năng lượng và kết nối mạng rồi mới bắn tin
+		k_work_reschedule(&publish_work, K_MSEC(500)); 
+
+		// Hẹn giờ đi ngủ sau 10s
+		k_work_reschedule(&cycle_work, K_MSEC(10000));
+
+	} else {
+		/* --- 🔴 MẠCH SẮP ĐI NGỦ (10s) --- */
+		
+		k_work_cancel_delayable(&publish_work); // Ngừng gửi tin chu kỳ 1s
+
+		// Bắn gói tin OFF cuối cùng để chốt sổ
+		//send_mesh_packet(false); 
+
+		// ÂN HẠN 1 GIÂY (1000ms): Chờ gói tin bay đi trót lọt rồi mới ủy quyền cho suspend_handler rút điện Radio!
+		//k_work_reschedule(&suspend_work, K_MSEC(1000)); 
+		k_work_reschedule(&suspend_work, K_NO_WAIT);
+
+		// Hẹn giờ thức giấc sau 10s
+		k_work_reschedule(&cycle_work, K_MSEC(10000));
+	}
+}
+
+static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
+		    const struct bt_mesh_onoff_set *set,
+		    struct bt_mesh_onoff_status *rsp)
+{
+	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
+	int led_idx = led - &led_ctx[0];
+
+	/* ----- ĐÓN VÀ XỬ LÝ GÓI TIN MẠCH B (LED 1) ----- */
+	if (led_idx == 1) { 
+		led->value = set->on_off;
+		
+		if (set->on_off == 1) {
+			dk_set_led(1, LED_ON);
+		} else {
+			dk_set_led(1, LED_OFF);
+		}
+	} 
+	/* ----- KÍCH HOẠT CHU KỲ NĂNG LƯỢNG QUA LED 2 ----- */
+	else if (led_idx == 2) { 
+		led->value = set->on_off;
+
+		if (set->on_off == 1) {
+			if (!cycle_mode_active) {
+				cycle_mode_active = true;
+				is_awake = true;
+				
+				k_work_reschedule(&blink_work, K_NO_WAIT);    
+				k_work_reschedule(&cycle_work, K_MSEC(10000));
+				
+				next_state_on = true;
+				k_work_reschedule(&publish_work, K_MSEC(500));
+			}
+		} else {
+			cycle_mode_active = false;
+			is_awake = true; 
+			
+			// Hủy toàn bộ mọi lịch trình đang chờ
+			k_work_cancel_delayable(&cycle_work);
+			k_work_cancel_delayable(&blink_work);
+			k_work_cancel_delayable(&publish_work);
+			k_work_cancel_delayable(&suspend_work); // Bổ sung hủy bộ đệm đi ngủ
+			
+			bt_mesh_resume(); // Ép hệ thống luôn thức
+			dk_set_led(2, LED_ON);
+
+			for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
+				if (i != 1 && i != 2 && i != 3) {
+					dk_set_led(i, led_ctx[i].value ? LED_ON : LED_OFF);
+				}
+			}
+		}
+	} 
+	else {
+		led->value = set->on_off; 
+		if (!bt_mesh_model_transition_time(set->transition)) {
+			led->remaining = 0;
+			if (is_awake && led_idx != 3) {
+				dk_set_led(led_idx, set->on_off ? LED_ON : LED_OFF);
+			}
+		} else {
+			led->remaining = set->transition->time;
+			if (set->transition->delay) {
+				k_work_reschedule(&led->work, K_MSEC(set->transition->delay));
+			} else {
+				if (is_awake && led_idx != 3) {
+					led_transition_start(led);
+				}
+			}
+		}
+	}
+
+	if (rsp) {
+		led_status(led, rsp);
+	}
+}
+
+static void led_get(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
+		    struct bt_mesh_onoff_status *rsp)
+{
+	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
+	led_status(led, rsp);
+}
+
+static void led_work(struct k_work *work)
+{
+	struct led_ctx *led = CONTAINER_OF(work, struct led_ctx, work.work);
+	int led_idx = led - &led_ctx[0];
+
+	if (led->remaining) {
+		led_transition_start(led);
+	} else {
+		if (is_awake && led_idx != 1 && led_idx != 2 && led_idx != 3) {
+			dk_set_led(led_idx, led->value ? LED_ON : LED_OFF);
+		}
+		struct bt_mesh_onoff_status status;
+		led_status(led, &status);
+		bt_mesh_onoff_srv_pub(&led->srv, NULL, &status);
+	}
+}
+
+static struct k_work_delayable attention_blink_work;
+static bool attention;
+
+static void attention_blink(struct k_work *work)
+{
+	static int idx;
+	const uint8_t pattern[] = {
+#if DT_NODE_EXISTS(DT_ALIAS(led0))
+		BIT(0),
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+		BIT(1),
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+		BIT(2),
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led3))
+		BIT(3),
+#endif
+	};
+
+	if (attention) {
+		dk_set_leds(pattern[idx++ % ARRAY_SIZE(pattern)]);
+		k_work_reschedule(&attention_blink_work, K_MSEC(30));
+	} else {
+		for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
+			dk_set_led(i, LED_OFF);
+		}
+	}
+}
+
+static void attention_on(const struct bt_mesh_model *mod)
+{
+	attention = true;
+	k_work_reschedule(&attention_blink_work, K_NO_WAIT);
+}
+
+static void attention_off(const struct bt_mesh_model *mod)
+{
+	attention = false;
+}
+
+static const struct bt_mesh_health_srv_cb health_srv_cb = {
+	.attn_on = attention_on,
+	.attn_off = attention_off,
+};
+
+static struct bt_mesh_health_srv health_srv = {
+	.cb = &health_srv_cb,
+};
+
+BT_MESH_HEALTH_PUB_DEFINE(health_pub, 0);
+
+static struct bt_mesh_elem elements[] = {
+#if DT_NODE_EXISTS(DT_ALIAS(led0))
+	BT_MESH_ELEM(
+		1, BT_MESH_MODEL_LIST(
+			BT_MESH_MODEL_CFG_SRV,
+			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub),
+			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv),
+			BT_MESH_MODEL_ONOFF_CLI(&onoff_cli)),
+		BT_MESH_MODEL_NONE),
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+	BT_MESH_ELEM(
+		2, BT_MESH_MODEL_LIST(BT_MESH_MODEL_ONOFF_SRV(&led_ctx[1].srv)),
+		BT_MESH_MODEL_NONE),
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+	BT_MESH_ELEM(
+		3, BT_MESH_MODEL_LIST(BT_MESH_MODEL_ONOFF_SRV(&led_ctx[2].srv)),
+		BT_MESH_MODEL_NONE),
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led3))
+	BT_MESH_ELEM(
+		4, BT_MESH_MODEL_LIST(BT_MESH_MODEL_ONOFF_SRV(&led_ctx[3].srv)),
+		BT_MESH_MODEL_NONE),
+#endif
+};
+
+static const struct bt_mesh_comp comp = {
+	.cid = CONFIG_BT_COMPANY_ID,
+	.elem = elements,
+	.elem_count = ARRAY_SIZE(elements),
+};
+
+const struct bt_mesh_comp *model_handler_init(void)
+{
+	k_work_init_delayable(&attention_blink_work, attention_blink);
+
+	for (int i = 0; i < ARRAY_SIZE(led_ctx); ++i) {
+		k_work_init_delayable(&led_ctx[i].work, led_work);
+		led_ctx[i].value = 0; 
+	}
+
+	// Đăng ký toàn bộ hàng đợi
+	k_work_init_delayable(&blink_work, blink_handler);
+	k_work_init_delayable(&cycle_work, cycle_handler);
+	k_work_init_delayable(&publish_work, publish_handler); 
+	k_work_init_delayable(&suspend_work, suspend_handler); // BỘ ĐỆM ĐI NGỦ
+
+	cycle_mode_active = false;
+	is_awake = true;
+	
+	for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
+		dk_set_led(i, LED_OFF); 
+	}
+	dk_set_led(2, LED_ON);
+
+	return &comp;
+}
