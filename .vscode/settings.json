@@ -2,6 +2,7 @@
     "nrf-connect.applications": [
         "${workspaceFolder}\\sleep",
         "${workspaceFolder}\\sleep_period",
-        "${workspaceFolder}\\sleep_period_root"
+        "${workspaceFolder}\\sleep_period_root",
+        "${workspaceFolder}\\sleep_period_leaf"
     ]
 }

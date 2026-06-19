@@ -9,25 +9,28 @@
 #include <dk_buttons_and_leds.h>
 #include "model_handler.h"
 #include <zephyr/logging/log.h>
+#include <zephyr/net/buf.h> /* THÊM: Thư viện xử lý buffer cho Vendor Model */
+
 LOG_MODULE_REGISTER(model_handler, CONFIG_LOG_DEFAULT_LEVEL);
 
-/* --- THÊM MỚI: Cấu trúc lưu trữ dữ liệu Sensor --- */
-#define MAX_SENSORS 10 // Hỗ trợ lưu tối đa 10 mạch sensor khác nhau
+/* ========================================================================= */
+/* --- PHẦN THÊM MỚI: ĐỊNH NGHĨA VÀ XỬ LÝ VENDOR MODEL NHẬN SỐ NGUYÊN 32-BIT --- */
+#define VND_COMPANY_ID   0x0059   // Mã công ty Nordic
+#define VND_MODEL_ID_SRV 0x0002   // ID Model Nhận
+#define VND_OP_SENSOR_DATA BT_MESH_MODEL_OP_3(0x01, VND_COMPANY_ID)
 
+#define MAX_SENSORS 10
 struct sensor_node_t {
-    uint16_t addr;    // Địa chỉ của mạch gửi (Source Address)
-    uint8_t value;    // Giá trị sensor (Hiện tại là 0 hoặc 1 do dùng OnOff)
-    bool is_active;   // Cờ đánh dấu slot này đã có dữ liệu chưa
+    uint16_t addr;
+    uint32_t value; 
+    bool is_active;
 };
-
 static struct sensor_node_t sensor_list[MAX_SENSORS];
 
-/* Hàm xử lý: Cập nhật dữ liệu mới và in ra bảng RTT */
-static void update_and_print_sensor_list(uint16_t sender_addr, uint8_t sensor_value)
+/* Hàm in danh sách ra Segger RTT */
+static void update_and_print_sensor_list(uint16_t sender_addr, uint32_t sensor_value)
 {
     bool found = false;
-
-    // 1. Tìm xem địa chỉ này đã có trong danh sách chưa để cập nhật
     for (int i = 0; i < MAX_SENSORS; i++) {
         if (sensor_list[i].is_active && sensor_list[i].addr == sender_addr) {
             sensor_list[i].value = sensor_value;
@@ -35,8 +38,6 @@ static void update_and_print_sensor_list(uint16_t sender_addr, uint8_t sensor_va
             break;
         }
     }
-
-    // 2. Nếu là node mới tinh, thêm vào vị trí trống đầu tiên
     if (!found) {
         for (int i = 0; i < MAX_SENSORS; i++) {
             if (!sensor_list[i].is_active) {
@@ -48,22 +49,37 @@ static void update_and_print_sensor_list(uint16_t sender_addr, uint8_t sensor_va
         }
     }
 
-    // 3. Vẽ bảng danh sách ra RTT Log
-    LOG_INF("\n");
-    LOG_INF("========================================");
+    LOG_INF("\n========================================");
     LOG_INF("      DANH SACH DU LIEU SENSOR HUB      ");
     LOG_INF("========================================");
     LOG_INF("|   DIA CHI NODE    |  GIA TRI SENSOR  |");
     LOG_INF("----------------------------------------");
     for (int i = 0; i < MAX_SENSORS; i++) {
         if (sensor_list[i].is_active) {
-            LOG_INF("|      0x%04X       |       %3d        |", 
+            LOG_INF("|      0x%04X       |    %10u    |", 
                     sensor_list[i].addr, sensor_list[i].value);
         }
     }
     LOG_INF("========================================\n");
 }
-/* --- KẾT THÚC THÊM MỚI --- */
+
+/* Callback xử lý khi có gói tin Vendor bay tới */
+static int handle_sensor_data(const struct bt_mesh_model *model,
+			      struct bt_mesh_msg_ctx *ctx,
+			      struct net_buf_simple *buf)
+{
+	uint32_t sensor_value = net_buf_simple_pull_le32(buf); // Lấy số 32-bit từ payload
+	update_and_print_sensor_list(ctx->addr, sensor_value);
+	return 0;
+}
+
+static const struct bt_mesh_model_op vnd_srv_ops[] = {
+	{ VND_OP_SENSOR_DATA, 4, handle_sensor_data }, 
+	BT_MESH_MODEL_OP_END,
+};
+/* ========================================================================= */
+
+/* --- TỪ ĐÂY TRỞ XUỐNG LÀ LOGIC GỐC CỦA BẠN (ĐƯỢC GIỮ NGUYÊN) --- */
 
 static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 		    const struct bt_mesh_onoff_set *set,
@@ -102,10 +118,6 @@ static struct led_ctx led_ctx[] = {
 static void led_transition_start(struct led_ctx *led)
 {
 	int led_idx = led - &led_ctx[0];
-
-	/* As long as the transition is in progress, the onoff
-	 * state is "on":
-	 */
 	dk_set_led(led_idx, true);
 	k_work_reschedule(&led->work, K_MSEC(led->remaining));
 	led->remaining = 0;
@@ -113,11 +125,9 @@ static void led_transition_start(struct led_ctx *led)
 
 static void led_status(struct led_ctx *led, struct bt_mesh_onoff_status *status)
 {
-	/* Do not include delay in the remaining time. */
 	status->remaining_time = led->remaining ? led->remaining :
 		k_ticks_to_ms_ceil32(k_work_delayable_remaining_get(&led->work));
 	status->target_on_off = led->value;
-	/* As long as the transition is in progress, the onoff state is "on": */
 	status->present_on_off = led->value || status->remaining_time;
 }
 
@@ -125,12 +135,9 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 		    const struct bt_mesh_onoff_set *set,
 		    struct bt_mesh_onoff_status *rsp)
 {
+	LOG_INF("Tin nhan nhan duoc: %d, tu source: 0x%04x", set->on_off, ctx->addr);
 	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
 	int led_idx = led - &led_ctx[0];
-
-	/* --- GỌI HÀM CẬP NHẬT DANH SÁCH RTT Ở ĐÂY --- */
-	update_and_print_sensor_list(ctx->addr, set->on_off);
-    /* -------------------------------------------- */
 
 	if (set->on_off == led->value) {
 		goto respond;
@@ -157,12 +164,10 @@ respond:
 	}
 }
 
-
 static void led_get(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 		    struct bt_mesh_onoff_status *rsp)
 {
 	struct led_ctx *led = CONTAINER_OF(srv, struct led_ctx, srv);
-
 	led_status(led, rsp);
 }
 
@@ -175,18 +180,12 @@ static void led_work(struct k_work *work)
 		led_transition_start(led);
 	} else {
 		dk_set_led(led_idx, led->value);
-
-		/* Publish the new value at the end of the transition */
 		struct bt_mesh_onoff_status status;
-
 		led_status(led, &status);
 		bt_mesh_onoff_srv_pub(&led->srv, NULL, &status);
 	}
 }
 
-/* Set up a repeating delayed work to blink the DK's LEDs when attention is
- * requested.
- */
 static struct k_work_delayable attention_blink_work;
 static bool attention;
 
@@ -224,7 +223,6 @@ static void attention_on(const struct bt_mesh_model *mod)
 
 static void attention_off(const struct bt_mesh_model *mod)
 {
-	/* Will stop rescheduling blink timer */
 	attention = false;
 }
 
@@ -246,7 +244,10 @@ static struct bt_mesh_elem elements[] = {
 			BT_MESH_MODEL_CFG_SRV,
 			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub),
 			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv)),
-		BT_MESH_MODEL_NONE),
+		/* THÊM MỚI VÀO ELEMENT 1: Thêm cái Vendor Server Model vào đuôi */
+		BT_MESH_MODEL_LIST(
+			BT_MESH_MODEL_VND(VND_COMPANY_ID, VND_MODEL_ID_SRV, vnd_srv_ops, NULL, NULL)
+		)),
 #endif
 #if DT_NODE_EXISTS(DT_ALIAS(led1))
 	BT_MESH_ELEM(

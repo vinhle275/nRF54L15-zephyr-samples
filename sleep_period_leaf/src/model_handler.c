@@ -10,8 +10,46 @@
 #include <dk_buttons_and_leds.h>
 #include "model_handler.h"
 #include <zephyr/logging/log.h>
+#include <zephyr/net/buf.h> /* THÊM: Thư viện xử lý buffer cho Vendor Model */
 
 LOG_MODULE_REGISTER(model_handler, CONFIG_LOG_DEFAULT_LEVEL);
+
+/* ========================================================================= */
+/* --- PHẦN THÊM MỚI: ĐỊNH NGHĨA VÀ XỬ LÝ VENDOR MODEL GỬI SỐ NGUYÊN 32-BIT --- */
+#define VND_COMPANY_ID   0x0059   // Mã công ty Nordic
+#define VND_MODEL_ID_CLI 0x0001   // ID Model Gửi cho mạch Sensor
+#define VND_OP_SENSOR_DATA BT_MESH_MODEL_OP_3(0x01, VND_COMPANY_ID)
+
+BT_MESH_MODEL_PUB_DEFINE(vnd_pub, NULL, 15);
+static struct bt_mesh_model *vnd_cli_model;
+
+static const struct bt_mesh_model_op vnd_cli_ops[] = {
+	BT_MESH_MODEL_OP_END,
+};
+
+/* HÀM MỚI: Dùng để phát số nguyên lớn 32-bit thay vì chỉ bắn On/Off */
+static void send_mesh_sensor_data_32bit(uint32_t sensor_value)
+{
+	if (!vnd_cli_model || vnd_cli_model->pub->addr == BT_MESH_ADDR_UNASSIGNED) {
+		LOG_WRN("--- [PHAT SONG]: Chua cau hinh Publish Address cho Vendor Model tren App! ---");
+		return;
+	}
+
+	struct net_buf_simple *msg = vnd_cli_model->pub->msg;
+	net_buf_simple_reset(msg);
+	
+	bt_mesh_model_msg_init(msg, VND_OP_SENSOR_DATA);
+	net_buf_simple_add_le32(msg, sensor_value); // Ép số nguyên 32-bit vào gói tin
+
+	int err = bt_mesh_model_publish(vnd_cli_model);
+	if (err) {
+		LOG_ERR("Loi gui tin Vendor (err %d)", err);
+	} else {
+		LOG_INF("--- [PHAT SONG VENDOR]: Da gui du lieu Sensor = %u den Target [0x%04X] ---", 
+				sensor_value, vnd_cli_model->pub->addr);
+	}
+}
+/* ========================================================================= */
 
 static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 		    const struct bt_mesh_onoff_set *set,
@@ -140,15 +178,19 @@ static void blink_handler(struct k_work *work)
 	k_work_reschedule(&blink_work, K_MSEC(100));
 }
 
-/* HÀM BẮN GÓI TIN: Liên tục gửi gói tin BẬT / TẮT khi đang thức */
+/* HÀM BẮN GÓI TIN: THAY ĐỔI ĐỂ PHÁT SỐ NGUYÊN LỚN THAY VÌ ON/OFF CHU KỲ */
 static void publish_handler(struct k_work *work)
 {
 	if (!cycle_mode_active || !is_awake) {
 		return;
 	}
 
-	send_mesh_packet(next_state_on);
-	next_state_on = !next_state_on;
+	/* THAY ĐỔI: Thay vì gọi lệnh On/Off cũ, ta gọi hàm phát số nguyên lớn thực tế */
+	// send_mesh_packet(next_state_on); // Logic cũ (comment lại)
+	// next_state_on = !next_state_on;   // Logic cũ (comment lại)
+
+	/* Gửi giá trị số nguyên lớn mô phỏng hiện tại của sensor lên Hub */
+	send_mesh_sensor_data_32bit(simulated_sensor_value);
 
 	k_work_reschedule(&publish_work, K_MSEC(1000));
 }
@@ -205,7 +247,7 @@ static void cycle_handler(struct k_work *work)
 		k_work_reschedule(&cycle_work, K_MSEC(10000));
 
 		/* --- CHỈ TĂNG VÀ HIỂN THỊ SENSOR MỖI KHI BẮT ĐẦU CHU KỲ THỨC MỚI --- */
-		simulated_sensor_value++;
+		simulated_sensor_value += 1; /* THAY ĐỔI: Cộng bước lớn (ví dụ +1235) để tạo ra số nguyên lớn thực sự */
 		LOG_INF("--- [SENSOR]: Gia tri sensor hien tai = %d ---", simulated_sensor_value);
 		display_sensor_value();
 
@@ -255,7 +297,7 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 				k_work_reschedule(&publish_work, K_MSEC(500));
 
 				/* --- TĂNG VÀ HIỂN THỊ SENSOR TẠI LẦN THỨC ĐẦU TIÊN CỦA CHU KỲ --- */
-				simulated_sensor_value++;
+				//simulated_sensor_value += 1;
 				LOG_INF("--- [SENSOR]: Bat dau chu ky, gia tri sensor = %d ---", simulated_sensor_value);
 				display_sensor_value();
 			}
@@ -388,7 +430,10 @@ static struct bt_mesh_elem elements[] = {
 			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub),
 			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv),
 			BT_MESH_MODEL_ONOFF_CLI(&onoff_cli)),
-		BT_MESH_MODEL_NONE),
+		/* CHÊM VÀO ĐUÔI ELEMENT 1: Khai báo Vendor Client Model để hệ thống biên dịch */
+		BT_MESH_MODEL_LIST(
+			BT_MESH_MODEL_VND(VND_COMPANY_ID, VND_MODEL_ID_CLI, vnd_cli_ops, &vnd_pub, NULL)
+		)),
 #endif
 #if DT_NODE_EXISTS(DT_ALIAS(led1))
 	BT_MESH_ELEM(
@@ -427,6 +472,9 @@ const struct bt_mesh_comp *model_handler_init(void)
 	k_work_init_delayable(&cycle_work, cycle_handler);
 	k_work_init_delayable(&publish_work, publish_handler); 
 	k_work_init_delayable(&suspend_work, suspend_handler); // BỘ ĐỆM ĐI NGỦ
+
+	/* THÊM: Trỏ con trỏ lưu địa chỉ Vendor Model Client khi khởi động */
+	vnd_cli_model = &elements[0].vnd_models[0];
 
 	cycle_mode_active = false;
 	is_awake = true;
