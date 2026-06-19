@@ -70,7 +70,7 @@ static void led_status(struct led_ctx *led, struct bt_mesh_onoff_status *status)
  * LOGIC CHU KỲ NGUỒN VÀ TRUYỀN DỮ LIỆU CÓ BỘ ĐỆM AN TOÀN
  * ==================================================================== */
 static struct k_work_delayable cycle_work;   // Timer đảo trạng thái Thức/Ngủ
-static struct k_work_delayable suspend_work; // MỚI: Timer delay để tắt Radio an toàn
+static struct k_work_delayable suspend_work; // Timer delay để tắt Radio an toàn
 static struct k_work_delayable blink_work;   // Timer nháy LED 2
 static struct k_work_delayable publish_work; // Timer gửi gói tin định kỳ
 
@@ -81,17 +81,39 @@ static bool next_state_on = true;
 
 static struct bt_mesh_onoff_cli onoff_cli; 
 
+/* ----- THÊM MỚI: BIẾN VÀ HÀM MÔ PHỎNG SENSOR ----- */
+static uint32_t simulated_sensor_value = 0;
+
+static void display_sensor_value(void)
+{
+	uint8_t mod_val = simulated_sensor_value % 4;
+
+	bool bit0 = (mod_val & 0x01) != 0; // Trạng thái cho LED1 (Index 0)
+	bool bit1 = (mod_val & 0x02) != 0; // Trạng thái cho LED2 (Index 1)
+
+	dk_set_led(0, bit0 ? LED_ON : LED_OFF);
+	dk_set_led(1, bit1 ? LED_ON : LED_OFF);
+}
+/* ------------------------------------------------- */
+
 /* HÀM PHỤ TRỢ: Đóng gói và gửi lệnh Mesh tới Group C002 */
 static void send_mesh_packet(bool turn_on)
 {
+	/* Kiểm tra xem Model đã được cấu hình địa chỉ Publish trên nRF Mesh App chưa */
+	if (onoff_cli.pub.addr == BT_MESH_ADDR_UNASSIGNED) {
+		LOG_WRN("--- [PHAT SONG]: Chua cau hinh Publish Address tren nRF Mesh App! ---");
+		return;
+	}
+
 	struct bt_mesh_onoff_set set = {
 		.on_off = turn_on ? 1 : 0, 
 		.transition = NULL,
 	};
 
+	/* LẤY ĐỊA CHỈ & APP KEY ĐỘNG: Trích xuất trực tiếp từ cấu hình nRF Mesh */
 	struct bt_mesh_msg_ctx ctx = {
-		.app_idx = 0,               // Map với AppKey 1
-		.addr = 0xC002,             // Gửi tới Group C002
+		.app_idx = onoff_cli.pub.key,       // Tự động map theo AppKey được gán khi Publish
+		.addr = onoff_cli.pub.addr,         // Gửi tới mạch cụ thể/Group cấu hình trên App
 		.send_ttl = BT_MESH_TTL_DEFAULT,              
 	};
 
@@ -100,7 +122,8 @@ static void send_mesh_packet(bool turn_on)
 	if (err && err != -EALREADY) {
 		LOG_ERR("Loi gui tin (err %d)", err);
 	} else {
-		LOG_INF("--- [PHAT SONG]: Da gui lenh %s len C002 ---", turn_on ? "BAT (ON)" : "TAT (OFF)");
+		LOG_INF("--- [PHAT SONG]: Da gui lenh %s den Target [0x%04X] ---", 
+				turn_on ? "BAT (ON)" : "TAT (OFF)", onoff_cli.pub.addr);
 	}
 }
 
@@ -140,15 +163,15 @@ static void suspend_handler(struct k_work *work)
 
 	k_work_cancel_delayable(&blink_work);  
 
+	/* ÉP TẮT TOÀN BỘ LED TRÊN MẠCH KHI ĐI NGỦ */
 	for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
 		dk_set_led(i, LED_OFF);
 	}
 
-	// ĐÓNG BĂNG MẠNG: Chỉ gọi hàm này khi chắc chắn hàng đợi Mesh TX đã trống
+	// ĐÓNG BĂNG MẠNG: Ngắt hoàn toàn chip RF để hạ dòng xuống mức uA
 	bt_mesh_suspend(); 
-	LOG_INF("--- [RADIO]: Da dong bang Radio, ngat mach di ngu! ---");
+	LOG_INF("--- [RADIO]: Da dong bang Radio, TAT HET LED, ngat mach di ngu! ---");
 }
-
 /* HÀM QUẢN LÝ CHU KỲ NGUỒN: Chỉ điều phối, nhường việc ngủ cho suspend_work */
 static void cycle_handler(struct k_work *work)
 {
@@ -181,16 +204,17 @@ static void cycle_handler(struct k_work *work)
 		// Hẹn giờ đi ngủ sau 10s
 		k_work_reschedule(&cycle_work, K_MSEC(10000));
 
+		/* --- CHỈ TĂNG VÀ HIỂN THỊ SENSOR MỖI KHI BẮT ĐẦU CHU KỲ THỨC MỚI --- */
+		simulated_sensor_value++;
+		LOG_INF("--- [SENSOR]: Gia tri sensor hien tai = %d ---", simulated_sensor_value);
+		display_sensor_value();
+
 	} else {
 		/* --- 🔴 MẠCH SẮP ĐI NGỦ (10s) --- */
 		
 		k_work_cancel_delayable(&publish_work); // Ngừng gửi tin chu kỳ 1s
 
-		// Bắn gói tin OFF cuối cùng để chốt sổ
-		//send_mesh_packet(false); 
-
 		// ÂN HẠN 1 GIÂY (1000ms): Chờ gói tin bay đi trót lọt rồi mới ủy quyền cho suspend_handler rút điện Radio!
-		//k_work_reschedule(&suspend_work, K_MSEC(1000)); 
 		k_work_reschedule(&suspend_work, K_NO_WAIT);
 
 		// Hẹn giờ thức giấc sau 10s
@@ -229,6 +253,11 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 				
 				next_state_on = true;
 				k_work_reschedule(&publish_work, K_MSEC(500));
+
+				/* --- TĂNG VÀ HIỂN THỊ SENSOR TẠI LẦN THỨC ĐẦU TIÊN CỦA CHU KỲ --- */
+				simulated_sensor_value++;
+				LOG_INF("--- [SENSOR]: Bat dau chu ky, gia tri sensor = %d ---", simulated_sensor_value);
+				display_sensor_value();
 			}
 		} else {
 			cycle_mode_active = false;
