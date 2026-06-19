@@ -10,8 +10,46 @@
 #include <dk_buttons_and_leds.h>
 #include "model_handler.h"
 #include <zephyr/logging/log.h>
+#include <zephyr/net/buf.h> /* THÊM: Thư viện xử lý buffer cho Vendor Model */
 
 LOG_MODULE_REGISTER(model_handler, CONFIG_LOG_DEFAULT_LEVEL);
+
+/* ========================================================================= */
+/* --- PHẦN THÊM MỚI: ĐỊNH NGHĨA VÀ XỬ LÝ VENDOR MODEL GỬI SỐ NGUYÊN 32-BIT --- */
+#define VND_COMPANY_ID   0x0059   // Mã công ty Nordic
+#define VND_MODEL_ID_CLI 0x0001   // ID Model Gửi cho mạch Sensor
+#define VND_OP_SENSOR_DATA BT_MESH_MODEL_OP_3(0x01, VND_COMPANY_ID)
+
+BT_MESH_MODEL_PUB_DEFINE(vnd_pub, NULL, 15);
+static struct bt_mesh_model *vnd_cli_model;
+
+static const struct bt_mesh_model_op vnd_cli_ops[] = {
+	BT_MESH_MODEL_OP_END,
+};
+
+/* HÀM MỚI: Dùng để phát số nguyên lớn 32-bit thay vì chỉ bắn On/Off */
+static void send_mesh_sensor_data_32bit(uint32_t sensor_value)
+{
+	if (!vnd_cli_model || vnd_cli_model->pub->addr == BT_MESH_ADDR_UNASSIGNED) {
+		LOG_WRN("--- [PHAT SONG]: Chua cau hinh Publish Address cho Vendor Model tren App! ---");
+		return;
+	}
+
+	struct net_buf_simple *msg = vnd_cli_model->pub->msg;
+	net_buf_simple_reset(msg);
+	
+	bt_mesh_model_msg_init(msg, VND_OP_SENSOR_DATA);
+	net_buf_simple_add_le32(msg, sensor_value); // Ép số nguyên 32-bit vào gói tin
+
+	int err = bt_mesh_model_publish(vnd_cli_model);
+	if (err) {
+		LOG_ERR("Loi gui tin Vendor (err %d)", err);
+	} else {
+		LOG_INF("--- [PHAT SONG VENDOR]: Da gui du lieu Sensor = %u den Target [0x%04X] ---", 
+				sensor_value, vnd_cli_model->pub->addr);
+	}
+}
+/* ========================================================================= */
 
 static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 		    const struct bt_mesh_onoff_set *set,
@@ -70,7 +108,7 @@ static void led_status(struct led_ctx *led, struct bt_mesh_onoff_status *status)
  * LOGIC CHU KỲ NGUỒN VÀ TRUYỀN DỮ LIỆU CÓ BỘ ĐỆM AN TOÀN
  * ==================================================================== */
 static struct k_work_delayable cycle_work;   // Timer đảo trạng thái Thức/Ngủ
-static struct k_work_delayable suspend_work; // MỚI: Timer delay để tắt Radio an toàn
+static struct k_work_delayable suspend_work; // Timer delay để tắt Radio an toàn
 static struct k_work_delayable blink_work;   // Timer nháy LED 2
 static struct k_work_delayable publish_work; // Timer gửi gói tin định kỳ
 
@@ -81,17 +119,39 @@ static bool next_state_on = true;
 
 static struct bt_mesh_onoff_cli onoff_cli; 
 
+/* ----- THÊM MỚI: BIẾN VÀ HÀM MÔ PHỎNG SENSOR ----- */
+static uint32_t simulated_sensor_value = 0;
+
+static void display_sensor_value(void)
+{
+	uint8_t mod_val = simulated_sensor_value % 4;
+
+	bool bit0 = (mod_val & 0x01) != 0; // Trạng thái cho LED1 (Index 0)
+	bool bit1 = (mod_val & 0x02) != 0; // Trạng thái cho LED2 (Index 1)
+
+	dk_set_led(0, bit0 ? LED_ON : LED_OFF);
+	dk_set_led(1, bit1 ? LED_ON : LED_OFF);
+}
+/* ------------------------------------------------- */
+
 /* HÀM PHỤ TRỢ: Đóng gói và gửi lệnh Mesh tới Group C002 */
 static void send_mesh_packet(bool turn_on)
 {
+	/* Kiểm tra xem Model đã được cấu hình địa chỉ Publish trên nRF Mesh App chưa */
+	if (onoff_cli.pub.addr == BT_MESH_ADDR_UNASSIGNED) {
+		LOG_WRN("--- [PHAT SONG]: Chua cau hinh Publish Address tren nRF Mesh App! ---");
+		return;
+	}
+
 	struct bt_mesh_onoff_set set = {
 		.on_off = turn_on ? 1 : 0, 
 		.transition = NULL,
 	};
 
+	/* LẤY ĐỊA CHỈ & APP KEY ĐỘNG: Trích xuất trực tiếp từ cấu hình nRF Mesh */
 	struct bt_mesh_msg_ctx ctx = {
-		.app_idx = 0,               // Map với AppKey 1
-		.addr = 0xC002,             // Gửi tới Group C002
+		.app_idx = onoff_cli.pub.key,       // Tự động map theo AppKey được gán khi Publish
+		.addr = onoff_cli.pub.addr,         // Gửi tới mạch cụ thể/Group cấu hình trên App
 		.send_ttl = BT_MESH_TTL_DEFAULT,              
 	};
 
@@ -100,7 +160,8 @@ static void send_mesh_packet(bool turn_on)
 	if (err && err != -EALREADY) {
 		LOG_ERR("Loi gui tin (err %d)", err);
 	} else {
-		LOG_INF("--- [PHAT SONG]: Da gui lenh %s len C002 ---", turn_on ? "BAT (ON)" : "TAT (OFF)");
+		LOG_INF("--- [PHAT SONG]: Da gui lenh %s den Target [0x%04X] ---", 
+				turn_on ? "BAT (ON)" : "TAT (OFF)", onoff_cli.pub.addr);
 	}
 }
 
@@ -117,15 +178,19 @@ static void blink_handler(struct k_work *work)
 	k_work_reschedule(&blink_work, K_MSEC(100));
 }
 
-/* HÀM BẮN GÓI TIN: Liên tục gửi gói tin BẬT / TẮT khi đang thức */
+/* HÀM BẮN GÓI TIN: THAY ĐỔI ĐỂ PHÁT SỐ NGUYÊN LỚN THAY VÌ ON/OFF CHU KỲ */
 static void publish_handler(struct k_work *work)
 {
 	if (!cycle_mode_active || !is_awake) {
 		return;
 	}
 
-	send_mesh_packet(next_state_on);
-	next_state_on = !next_state_on;
+	/* THAY ĐỔI: Thay vì gọi lệnh On/Off cũ, ta gọi hàm phát số nguyên lớn thực tế */
+	// send_mesh_packet(next_state_on); // Logic cũ (comment lại)
+	// next_state_on = !next_state_on;   // Logic cũ (comment lại)
+
+	/* Gửi giá trị số nguyên lớn mô phỏng hiện tại của sensor lên Hub */
+	send_mesh_sensor_data_32bit(simulated_sensor_value);
 
 	k_work_reschedule(&publish_work, K_MSEC(1000));
 }
@@ -140,15 +205,15 @@ static void suspend_handler(struct k_work *work)
 
 	k_work_cancel_delayable(&blink_work);  
 
+	/* ÉP TẮT TOÀN BỘ LED TRÊN MẠCH KHI ĐI NGỦ */
 	for (int i = 0; i < ARRAY_SIZE(led_ctx); i++) {
 		dk_set_led(i, LED_OFF);
 	}
 
-	// ĐÓNG BĂNG MẠNG: Chỉ gọi hàm này khi chắc chắn hàng đợi Mesh TX đã trống
+	// ĐÓNG BĂNG MẠNG: Ngắt hoàn toàn chip RF để hạ dòng xuống mức uA
 	bt_mesh_suspend(); 
-	LOG_INF("--- [RADIO]: Da dong bang Radio, ngat mach di ngu! ---");
+	LOG_INF("--- [RADIO]: Da dong bang Radio, TAT HET LED, ngat mach di ngu! ---");
 }
-
 /* HÀM QUẢN LÝ CHU KỲ NGUỒN: Chỉ điều phối, nhường việc ngủ cho suspend_work */
 static void cycle_handler(struct k_work *work)
 {
@@ -181,16 +246,17 @@ static void cycle_handler(struct k_work *work)
 		// Hẹn giờ đi ngủ sau 10s
 		k_work_reschedule(&cycle_work, K_MSEC(10000));
 
+		/* --- CHỈ TĂNG VÀ HIỂN THỊ SENSOR MỖI KHI BẮT ĐẦU CHU KỲ THỨC MỚI --- */
+		simulated_sensor_value += 1; /* THAY ĐỔI: Cộng bước lớn (ví dụ +1235) để tạo ra số nguyên lớn thực sự */
+		LOG_INF("--- [SENSOR]: Gia tri sensor hien tai = %d ---", simulated_sensor_value);
+		display_sensor_value();
+
 	} else {
 		/* --- 🔴 MẠCH SẮP ĐI NGỦ (10s) --- */
 		
 		k_work_cancel_delayable(&publish_work); // Ngừng gửi tin chu kỳ 1s
 
-		// Bắn gói tin OFF cuối cùng để chốt sổ
-		//send_mesh_packet(false); 
-
 		// ÂN HẠN 1 GIÂY (1000ms): Chờ gói tin bay đi trót lọt rồi mới ủy quyền cho suspend_handler rút điện Radio!
-		//k_work_reschedule(&suspend_work, K_MSEC(1000)); 
 		k_work_reschedule(&suspend_work, K_NO_WAIT);
 
 		// Hẹn giờ thức giấc sau 10s
@@ -229,6 +295,11 @@ static void led_set(struct bt_mesh_onoff_srv *srv, struct bt_mesh_msg_ctx *ctx,
 				
 				next_state_on = true;
 				k_work_reschedule(&publish_work, K_MSEC(500));
+
+				/* --- TĂNG VÀ HIỂN THỊ SENSOR TẠI LẦN THỨC ĐẦU TIÊN CỦA CHU KỲ --- */
+				//simulated_sensor_value += 1;
+				LOG_INF("--- [SENSOR]: Bat dau chu ky, gia tri sensor = %d ---", simulated_sensor_value);
+				display_sensor_value();
 			}
 		} else {
 			cycle_mode_active = false;
@@ -359,7 +430,10 @@ static struct bt_mesh_elem elements[] = {
 			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub),
 			BT_MESH_MODEL_ONOFF_SRV(&led_ctx[0].srv),
 			BT_MESH_MODEL_ONOFF_CLI(&onoff_cli)),
-		BT_MESH_MODEL_NONE),
+		/* CHÊM VÀO ĐUÔI ELEMENT 1: Khai báo Vendor Client Model để hệ thống biên dịch */
+		BT_MESH_MODEL_LIST(
+			BT_MESH_MODEL_VND(VND_COMPANY_ID, VND_MODEL_ID_CLI, vnd_cli_ops, &vnd_pub, NULL)
+		)),
 #endif
 #if DT_NODE_EXISTS(DT_ALIAS(led1))
 	BT_MESH_ELEM(
@@ -398,6 +472,9 @@ const struct bt_mesh_comp *model_handler_init(void)
 	k_work_init_delayable(&cycle_work, cycle_handler);
 	k_work_init_delayable(&publish_work, publish_handler); 
 	k_work_init_delayable(&suspend_work, suspend_handler); // BỘ ĐỆM ĐI NGỦ
+
+	/* THÊM: Trỏ con trỏ lưu địa chỉ Vendor Model Client khi khởi động */
+	vnd_cli_model = &elements[0].vnd_models[0];
 
 	cycle_mode_active = false;
 	is_awake = true;

@@ -10,24 +10,25 @@
     status = "okay";
 };
 
+/* Bật lại UART để xem log và mã OOB provisioning */
 &uart20 {
-    status = "disabled";
+    status = "okay";
 };
 
-// &i2c21 {
-//     compatible = "nordic,nrf-twim";
-//     status = "disabled";
-//     clock-frequency = <I2C_BITRATE_STANDARD>; /* 100kHz */
-//     pinctrl-0 = <&i2c21_default>;
-//     pinctrl-1 = <&i2c21_sleep>;
-//     pinctrl-names = "default", "sleep";
+&i2c21 {
+    compatible = "nordic,nrf-twim";
+    status = "okay";
+    clock-frequency = <I2C_BITRATE_STANDARD>; /* 100kHz */
+    pinctrl-0 = <&i2c21_default>;
+    pinctrl-1 = <&i2c21_sleep>;
+    pinctrl-names = "default", "sleep";
 
-//     mysensor: mysensor@55{
-//         compatible = "i2c-device";
-//         reg = <0x55>;
-//         label = "MYSENSOR";
-//     };
-// };
+    mysensor: mysensor@55{
+        compatible = "i2c-device";
+        reg = <0x55>;
+        label = "MYSENSOR";
+    };
+};
 
 &pinctrl {
     i2c21_default: i2c21_default {
@@ -36,7 +37,7 @@
             bias-pull-up;
         };
     };
-
+    
     i2c21_sleep: i2c21_sleep {
         group1 {
             psels = <NRF_PSEL(TWIM_SCL, 1, 11)>, <NRF_PSEL(TWIM_SDA, 1, 12)>;
@@ -96,18 +97,14 @@
         led1 = &led1;
         led2 = &led2;
         led3 = &led3;
-        // sw0 = &button0;
-        // sw1 = &button1;
-        // sw2 = &button2;
-        // sw3 = &button3;
-        // i2c-0 = &i2c21;
+        sw0 = &button0;
+        sw1 = &button1;
+        sw2 = &button2; /* Thêm alias cho switch 2 */
+        sw3 = &button3; /* Thêm alias cho switch 3 */
+        i2c-0 = &i2c21;
     };
 };
 
 &gpiote30 {
-    status = "okay";
-};
-
-&grtc {
     status = "okay";
 };
